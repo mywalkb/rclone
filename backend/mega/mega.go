@@ -16,11 +16,13 @@ Improvements:
 */
 
 import (
+        "os"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +38,7 @@ import (
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/readers"
-	mega "github.com/t3rm1n4l/go-mega"
+	mega "github.com/mywalkb/go-mega"
 )
 
 const (
@@ -667,7 +669,7 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 
 // Precision return the precision of this Fs
 func (f *Fs) Precision() time.Duration {
-	return fs.ModTimeNotSupported
+	return time.Second
 }
 
 // Purge deletes all the files in the directory
@@ -982,7 +984,12 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
-	return o.info.GetTimeStamp()
+	var modTime = o.info.GetModificationTime()
+	if modTime.Unix() > 0 {
+		return modTime
+	} else {
+		return o.info.GetTimeStamp()
+	}
 }
 
 // SetModTime sets the modification time of the local fs object
@@ -1122,7 +1129,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if size < 0 {
 		return errors.New("mega backend can't upload a file of unknown length")
 	}
-	//modTime := src.ModTime(ctx)
+	modTime := src.ModTime(ctx).Unix()
 	remote := o.Remote()
 
 	// Create the parent directory
@@ -1165,7 +1172,14 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	// Finish the upload
 	var info *mega.Node
 	err = o.fs.pacer.Call(func() (bool, error) {
-		info, err = u.Finish()
+		var infile *os.File
+		var nameFile = filepath.Join(src.Fs().Root(), src.String())
+		infile, err = os.OpenFile(nameFile, os.O_RDONLY, 0666)
+		defer infile.Close()
+		if err != nil {
+			fmt.Println("error", err)
+		}
+		info, err = u.Finish(infile, size, modTime)
 		return shouldRetry(ctx, err)
 	})
 	if err != nil {
