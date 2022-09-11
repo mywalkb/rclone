@@ -16,17 +16,18 @@ Improvements:
 */
 
 import (
-        "os"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	mega "github.com/mywalkb/go-mega"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -38,7 +39,6 @@ import (
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/readers"
-	mega "github.com/mywalkb/go-mega"
 )
 
 const (
@@ -987,9 +987,8 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 	var modTime = o.info.GetModificationTime()
 	if modTime.Unix() > 0 {
 		return modTime
-	} else {
-		return o.info.GetTimeStamp()
 	}
+	return o.info.GetTimeStamp()
 }
 
 // SetModTime sets the modification time of the local fs object
@@ -1175,11 +1174,12 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		var infile *os.File
 		var nameFile = filepath.Join(src.Fs().Root(), src.String())
 		infile, err = os.OpenFile(nameFile, os.O_RDONLY, 0666)
-		defer infile.Close()
 		if err != nil {
-			fmt.Println("error", err)
+			_ = infile.Close()
+			return shouldRetry(ctx, err)
 		}
 		info, err = u.Finish(infile, size, modTime)
+		_ = infile.Close()
 		return shouldRetry(ctx, err)
 	})
 	if err != nil {
