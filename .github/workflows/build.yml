@@ -8,7 +8,7 @@ name: build
 on:
   push:
     branches:
-      - '*'
+      - 'main'
     tags:
       - '*'
   pull_request:
@@ -20,76 +20,24 @@ on:
 
 jobs:
   build:
-    if: ${{ github.repository == 'rclone/rclone' || github.event.inputs.manual }}
+    if: ${{ github.repository == 'mywalkb/rclone' || github.event.inputs.manual }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        job_name: ['linux', 'linux_386', 'mac_amd64', 'mac_arm64', 'windows', 'other_os', 'go1.17', 'go1.18']
+        job_name: ['linux']
 
         include:
           - job_name: linux
             os: ubuntu-latest
             go: '1.19.x'
             gotags: cmount
-            build_flags: '-include "^linux/"'
+            build_flags: '-include "^linux/" -exclude "^linux/mips|^linux/arm"'
             check: true
             quicktest: true
             racequicktest: true
             librclonetest: true
             deploy: true
-
-          - job_name: linux_386
-            os: ubuntu-latest
-            go: '1.19.x'
-            goarch: 386
-            gotags: cmount
-            quicktest: true
-
-          - job_name: mac_amd64
-            os: macos-11
-            go: '1.19.x'
-            gotags: 'cmount'
-            build_flags: '-include "^darwin/amd64" -cgo'
-            quicktest: true
-            racequicktest: true
-            deploy: true
-
-          - job_name: mac_arm64
-            os: macos-11
-            go: '1.19.x'
-            gotags: 'cmount'
-            build_flags: '-include "^darwin/arm64" -cgo -macos-arch arm64 -cgo-cflags=-I/usr/local/include -cgo-ldflags=-L/usr/local/lib'
-            deploy: true
-
-          - job_name: windows
-            os: windows-latest
-            go: '1.19.x'
-            gotags: cmount
-            cgo: '0'
-            build_flags: '-include "^windows/"'
-            build_args: '-buildmode exe'
-            quicktest: true
-            deploy: true
-
-          - job_name: other_os
-            os: ubuntu-latest
-            go: '1.19.x'
-            build_flags: '-exclude "^(windows/|darwin/|linux/)"'
-            compile_all: true
-            deploy: true
-
-          - job_name: go1.17
-            os: ubuntu-latest
-            go: '1.17.x'
-            quicktest: true
-            racequicktest: true
-
-          - job_name: go1.18
-            os: ubuntu-latest
-            go: '1.18.x'
-            quicktest: true
-            racequicktest: true
 
     name: ${{ matrix.job_name }}
 
@@ -126,29 +74,6 @@ jobs:
           sudo apt-get install fuse libfuse-dev rpm pkg-config
         if: matrix.os == 'ubuntu-latest'
 
-      - name: Install Libraries on macOS
-        shell: bash
-        run: |
-          brew update
-          brew install --cask macfuse
-        if: matrix.os == 'macos-11'
-
-      - name: Install Libraries on Windows
-        shell: powershell
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          choco install -y winfsp zip
-          echo "CPATH=C:\Program Files\WinFsp\inc\fuse;C:\Program Files (x86)\WinFsp\inc\fuse" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          if ($env:GOARCH -eq "386") {
-            choco install -y mingw --forcex86 --force
-            echo "C:\\ProgramData\\chocolatey\\lib\\mingw\\tools\\install\\mingw32\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          }
-          # Copy mingw32-make.exe to make.exe so the same command line
-          # can be used on Windows as on macOS and Linux
-          $path = (get-command mingw32-make.exe).Path
-          Copy-Item -Path $path -Destination (Join-Path (Split-Path -Path $path) 'make.exe')
-        if: matrix.os == 'windows-latest'
-
       - name: Print Go version and environment
         shell: bash
         run: |
@@ -179,47 +104,38 @@ jobs:
         run: |
           rclone version
 
-      - name: Run tests
-        shell: bash
-        run: |
-          make quicktest
-        if: matrix.quicktest
-
-      - name: Race test
-        shell: bash
-        run: |
-          make racequicktest
-        if: matrix.racequicktest
-
-      - name: Run librclone tests
-        shell: bash
-        run: |
-          make -C librclone/ctest test
-          make -C librclone/ctest clean
-          librclone/python/test_rclone.py
-        if: matrix.librclonetest
-
-      - name: Compile all architectures test
-        shell: bash
-        run: |
-          make
-          make compile_all
-        if: matrix.compile_all
-
       - name: Deploy built binaries
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then make release_dep_linux ; fi
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then make release_dep_windows ; fi
-          make ci_beta
-        env:
-          RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
+          make cross2
         # working-directory: '$(modulePath)'
         # Deploy binaries if enabled in config && not a PR && not a fork
-        if: matrix.deploy && github.head_ref == '' && github.repository == 'rclone/rclone'
+        if: matrix.deploy && github.head_ref == '' && github.repository == 'mywalkb/rclone'
+
+      - name: Prepare artifact
+        if: success()
+        id: prepareArtifact
+        run: |
+          VER386=`ls -1d build/*main-linux-386* | sed 's/build\/rclone-//' | sed 's/\.main//' | tail -1 | sed 's/386\..*/386/'` && echo "::set-output name=VER386::$VER386"
+          VER386P=`ls -1d build/*main-linux-386* | sed 's/build\/rclone-//' | tail -1 | sed 's/386\..*/386/'` && echo "::set-output name=VER386P::$VER386P"
+          VERX64=`ls -1d build/*main-linux-amd64* | sed 's/build\/rclone-//' | sed 's/\.main//' | tail -1 | sed 's/amd64\..*/amd64/'` && echo "::set-output name=VERX64::$VERX64"
+          VERX64P=`ls -1d build/*main-linux-amd64* | sed 's/build\/rclone-//' | tail -1 | sed 's/amd64\..*/amd64/'` && echo "::set-output name=VERX64P::$VERX64P"
+
+      - name: Upload linux 386
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ steps.prepareArtifact.outputs.VER386 }}
+          path: build/rclone-${{ steps.prepareArtifact.outputs.VER386P }}.*
+
+      - name: Upload linux amd64
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ steps.prepareArtifact.outputs.VERX64 }}
+          path: build/rclone-${{ steps.prepareArtifact.outputs.VERX64P }}.*
 
   lint:
-    if: ${{ github.repository == 'rclone/rclone' || github.event.inputs.manual }}
+    if: ${{ github.repository == 'mywalkb/rclone' || github.event.inputs.manual }}
     timeout-minutes: 30
     name: "lint"
     runs-on: ubuntu-latest
@@ -235,7 +151,7 @@ jobs:
           version: latest
 
   android:
-    if: ${{ github.repository == 'rclone/rclone' || github.event.inputs.manual }}
+    if: ${{ github.repository == 'mywalkb/rclone' || github.event.inputs.manual }}
     timeout-minutes: 30
     name: "android-all"
     runs-on: ubuntu-latest
@@ -276,23 +192,6 @@ jobs:
           env PATH=$PATH:~/go/bin gomobile init
           echo "RCLONE_NDK_VERSION=21" >> $GITHUB_ENV
 
-      - name: arm-v7a gomobile build
-        run: env PATH=$PATH:~/go/bin gomobile bind -androidapi ${RCLONE_NDK_VERSION} -v -target=android/arm -javapkg=org.rclone -ldflags '-s -X github.com/rclone/rclone/fs.Version='${VERSION} github.com/rclone/rclone/librclone/gomobile
-
-      - name: arm-v7a Set environment variables
-        shell: bash
-        run: |
-          echo "CC=$(echo $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi${RCLONE_NDK_VERSION}-clang)" >> $GITHUB_ENV
-          echo "CC_FOR_TARGET=$CC" >> $GITHUB_ENV
-          echo 'GOOS=android' >> $GITHUB_ENV
-          echo 'GOARCH=arm' >> $GITHUB_ENV
-          echo 'GOARM=7' >> $GITHUB_ENV
-          echo 'CGO_ENABLED=1' >> $GITHUB_ENV
-          echo 'CGO_LDFLAGS=-fuse-ld=lld -s -w' >> $GITHUB_ENV
-
-      - name: arm-v7a build
-        run: go build -v -tags android -trimpath -ldflags '-s -X github.com/rclone/rclone/fs.Version='${VERSION} -o build/rclone-android-${RCLONE_NDK_VERSION}-armv7a .
-
       - name: arm64-v8a Set environment variables
         shell: bash
         run: |
@@ -304,38 +203,10 @@ jobs:
           echo 'CGO_LDFLAGS=-fuse-ld=lld -s -w' >> $GITHUB_ENV
 
       - name: arm64-v8a build
-        run: go build -v -tags android -trimpath -ldflags '-s -X github.com/rclone/rclone/fs.Version='${VERSION} -o build/rclone-android-${RCLONE_NDK_VERSION}-armv8a .
+        run: go build -v -tags android -trimpath -ldflags '-s -X github.com/mywalkb/rclone/fs.Version='${VERSION} -o build/rclone-android-${RCLONE_NDK_VERSION}-armv8a/rclone .
 
-      - name: x86 Set environment variables
-        shell: bash
-        run: |
-          echo "CC=$(echo $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android${RCLONE_NDK_VERSION}-clang)" >> $GITHUB_ENV
-          echo "CC_FOR_TARGET=$CC" >> $GITHUB_ENV
-          echo 'GOOS=android' >> $GITHUB_ENV
-          echo 'GOARCH=386' >> $GITHUB_ENV
-          echo 'CGO_ENABLED=1' >> $GITHUB_ENV
-          echo 'CGO_LDFLAGS=-fuse-ld=lld -s -w' >> $GITHUB_ENV
-
-      - name: x86 build
-        run: go build -v -tags android -trimpath -ldflags '-s -X github.com/rclone/rclone/fs.Version='${VERSION} -o build/rclone-android-${RCLONE_NDK_VERSION}-x86 .
-
-      - name: x64 Set environment variables
-        shell: bash
-        run: |
-          echo "CC=$(echo $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${RCLONE_NDK_VERSION}-clang)" >> $GITHUB_ENV
-          echo "CC_FOR_TARGET=$CC" >> $GITHUB_ENV
-          echo 'GOOS=android' >> $GITHUB_ENV
-          echo 'GOARCH=amd64' >> $GITHUB_ENV
-          echo 'CGO_ENABLED=1' >> $GITHUB_ENV
-          echo 'CGO_LDFLAGS=-fuse-ld=lld -s -w' >> $GITHUB_ENV
-
-      - name: x64 build
-        run: go build -v -tags android -trimpath -ldflags '-s -X github.com/rclone/rclone/fs.Version='${VERSION} -o build/rclone-android-${RCLONE_NDK_VERSION}-x64 .
-
-      - name: Upload artifacts
-        run: |
-          make ci_upload
-        env:
-          RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
-        # Upload artifacts if not a PR && not a fork
-        if: github.head_ref == '' && github.repository == 'rclone/rclone'
+      - name: Upload android arm64
+        uses: actions/upload-artifact@v3
+        with:
+          name: rclone-android-${{ env.RCLONE_NDK_VERSION }}-armv8a
+          path: build/rclone-android-${{ env.RCLONE_NDK_VERSION }}-armv8a/*
