@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -65,14 +64,18 @@ var cmdSelfUpdate = &cobra.Command{
 	Aliases: []string{"self-update"},
 	Short:   `Update the rclone binary.`,
 	Long:    strings.ReplaceAll(selfUpdateHelp, "|", "`"),
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.55",
+	},
 	Run: func(command *cobra.Command, args []string) {
+		ctx := context.Background()
 		cmd.CheckArgs(0, 0, command, args)
 		if Opt.Package == "" {
 			Opt.Package = "zip"
 		}
 		gotActionFlags := Opt.Stable || Opt.Beta || Opt.Output != "" || Opt.Version != "" || Opt.Package != "zip"
 		if Opt.Check && !gotActionFlags {
-			versionCmd.CheckVersion()
+			versionCmd.CheckVersion(ctx)
 			return
 		}
 		if Opt.Package != "zip" {
@@ -106,7 +109,7 @@ func GetVersion(ctx context.Context, beta bool, version string) (newVersion, sit
 
 	if version == "" {
 		// Request the latest release number from the download site
-		_, newVersion, _, err = versionCmd.GetVersion(siteURL + "/version.txt")
+		_, newVersion, _, err = versionCmd.GetVersion(ctx, siteURL+"/version.txt")
 		return
 	}
 
@@ -227,7 +230,7 @@ func InstallUpdate(ctx context.Context, opt *Options) error {
 }
 
 func installPackage(ctx context.Context, beta bool, version, siteURL, packageFormat string) error {
-	tempFile, err := ioutil.TempFile("", "rclone.*."+packageFormat)
+	tempFile, err := os.CreateTemp("", "rclone.*."+packageFormat)
 	if err != nil {
 		return fmt.Errorf("unable to write temporary package: %w", err)
 	}
@@ -334,11 +337,31 @@ func makeRandomExeName(baseName, extension string) (string, error) {
 
 func downloadUpdate(ctx context.Context, beta bool, version, siteURL, newFile, packageFormat string) error {
 	osName := runtime.GOOS
-	arch := runtime.GOARCH
 	if osName == "darwin" {
 		osName = "osx"
 	}
-
+	arch := runtime.GOARCH
+	if arch == "arm" {
+		// Check the ARM compatibility level of the current CPU.
+		// We don't know if this matches the rclone binary currently running, it
+		// could for example be a ARMv6 variant running on a ARMv7 compatible CPU,
+		// so we will simply pick the best possible variant.
+		switch buildinfo.GetSupportedGOARM() {
+		case 7:
+			// This system can run any binaries built with GOARCH=arm, including GOARM=7.
+			// Pick the ARMv7 variant of rclone, published with suffix "arm-v7".
+			arch = "arm-v7"
+		case 6:
+			// This system can run binaries built with GOARCH=arm and GOARM=6 or lower.
+			// Pick the ARMv6 variant of rclone, published with suffix "arm-v6".
+			arch = "arm-v6"
+		case 5:
+			// This system can only run binaries built with GOARCH=arm and GOARM=5.
+			// Pick the ARMv5 variant of rclone, which also works without hardfloat,
+			// published with suffix "arm".
+			arch = "arm"
+		}
+	}
 	archiveFilename := fmt.Sprintf("rclone-%s-%s-%s.%s", version, osName, arch, packageFormat)
 	archiveURL := fmt.Sprintf("%s/%s/%s", siteURL, version, archiveFilename)
 	archiveBuf, err := downloadFile(ctx, archiveURL)
@@ -357,7 +380,7 @@ func downloadUpdate(ctx context.Context, beta bool, version, siteURL, newFile, p
 	}
 
 	if packageFormat == "deb" || packageFormat == "rpm" {
-		if err := ioutil.WriteFile(newFile, archiveBuf, 0644); err != nil {
+		if err := os.WriteFile(newFile, archiveBuf, 0644); err != nil {
 			return fmt.Errorf("cannot write temporary .%s: %w", packageFormat, err)
 		}
 		return nil
@@ -471,5 +494,5 @@ func downloadFile(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed with %s downloading %s", resp.Status, url)
 	}
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }

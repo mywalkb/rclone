@@ -81,6 +81,9 @@ quicktest:
 racequicktest:
 	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) -cpu=2 -race ./...
 
+compiletest:
+	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) -run XXX ./...
+
 # Do source code quality checks
 check:	rclone
 	@echo "-- START CODE QUALITY REPORT -------------------------------"
@@ -93,7 +96,7 @@ build_dep:
 
 # Get the release dependencies we only install on linux
 release_dep_linux:
-	go run bin/get-github-release.go -extract nfpm goreleaser/nfpm 'nfpm_.*_Linux_x86_64\.tar\.gz'
+	go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
 
 # Get the release dependencies we only install on Windows
 release_dep_windows:

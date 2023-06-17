@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -40,7 +39,7 @@ const (
 	minSleep                   = 10 * time.Millisecond // In case of error, start at 10ms sleep.
 )
 
-// SharedOptions are shared between swift and hubic
+// SharedOptions are shared between swift and backends which depend on swift
 var SharedOptions = []fs.Option{{
 	Name: "chunk_size",
 	Help: `Above this size files will be chunked into a _segments container.
@@ -61,6 +60,32 @@ files are easier to deal with and have an MD5SUM.
 
 Rclone will still chunk files bigger than chunk_size when doing normal
 copy operations.`,
+	Default:  false,
+	Advanced: true,
+}, {
+	Name: "no_large_objects",
+	Help: strings.ReplaceAll(`Disable support for static and dynamic large objects
+
+Swift cannot transparently store files bigger than 5 GiB. There are
+two schemes for doing that, static or dynamic large objects, and the
+API does not allow rclone to determine whether a file is a static or
+dynamic large object without doing a HEAD on the object. Since these
+need to be treated differently, this means rclone has to issue HEAD
+requests for objects for example when reading checksums.
+
+When |no_large_objects| is set, rclone will assume that there are no
+static or dynamic large objects stored. This means it can stop doing
+the extra HEAD calls which in turn increases performance greatly
+especially when doing a swift to swift transfer with |--checksum| set.
+
+Setting this option implies |no_chunk| and also that no files will be
+uploaded in chunks, so files bigger than 5 GiB will just fail on
+upload.
+
+If you set this option and there *are* static or dynamic large objects,
+then this will give incorrect hashes for them. Downloads will succeed,
+but other operations such as Remove and Copy will fail.
+`, "|", "`"),
 	Default:  false,
 	Advanced: true,
 }, {
@@ -222,6 +247,7 @@ type Options struct {
 	EndpointType                string               `config:"endpoint_type"`
 	ChunkSize                   fs.SizeSuffix        `config:"chunk_size"`
 	NoChunk                     bool                 `config:"no_chunk"`
+	NoLargeObjects              bool                 `config:"no_large_objects"`
 	Enc                         encoder.MultiEncoder `config:"encoding"`
 }
 
@@ -1100,15 +1126,24 @@ func (o *Object) hasHeader(ctx context.Context, header string) (bool, error) {
 
 // isDynamicLargeObject checks for X-Object-Manifest header
 func (o *Object) isDynamicLargeObject(ctx context.Context) (bool, error) {
+	if o.fs.opt.NoLargeObjects {
+		return false, nil
+	}
 	return o.hasHeader(ctx, "X-Object-Manifest")
 }
 
 // isStaticLargeObjectFile checks for the X-Static-Large-Object header
 func (o *Object) isStaticLargeObject(ctx context.Context) (bool, error) {
+	if o.fs.opt.NoLargeObjects {
+		return false, nil
+	}
 	return o.hasHeader(ctx, "X-Static-Large-Object")
 }
 
 func (o *Object) isLargeObject(ctx context.Context) (result bool, err error) {
+	if o.fs.opt.NoLargeObjects {
+		return false, nil
+	}
 	result, err = o.hasHeader(ctx, "X-Static-Large-Object")
 	if result {
 		return
@@ -1292,23 +1327,6 @@ func (o *Object) removeSegmentsLargeObject(ctx context.Context, containerSegment
 	return nil
 }
 
-func (o *Object) getSegmentsDlo(ctx context.Context) (segmentsContainer string, prefix string, err error) {
-	if err = o.readMetaData(ctx); err != nil {
-		return
-	}
-	dirManifest := o.headers["X-Object-Manifest"]
-	dirManifest, err = url.PathUnescape(dirManifest)
-	if err != nil {
-		return
-	}
-	delimiter := strings.Index(dirManifest, "/")
-	if len(dirManifest) == 0 || delimiter < 0 {
-		err = errors.New("missing or wrong structure of manifest of Dynamic large object")
-		return
-	}
-	return dirManifest[:delimiter], dirManifest[delimiter+1:], nil
-}
-
 // urlEncode encodes a string so that it is a valid URL
 //
 // We don't use any of Go's standard methods as we need `/` not
@@ -1464,7 +1482,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	headers := m.ObjectHeaders()
 	fs.OpenOptionAddHeaders(options, headers)
 
-	if size > int64(o.fs.opt.ChunkSize) || (size == -1 && !o.fs.opt.NoChunk) {
+	if (size > int64(o.fs.opt.ChunkSize) || (size == -1 && !o.fs.opt.NoChunk)) && !o.fs.opt.NoLargeObjects {
 		_, err = o.updateChunks(ctx, in, headers, size, contentType)
 		if err != nil {
 			return err
@@ -1540,6 +1558,10 @@ func (o *Object) Remove(ctx context.Context) (err error) {
 	// Remove file/manifest first
 	err = o.fs.pacer.Call(func() (bool, error) {
 		err = o.fs.c.ObjectDelete(ctx, container, containerPath)
+		if err == swift.ObjectNotFound {
+			fs.Errorf(o, "Dangling object - ignoring: %v", err)
+			err = nil
+		}
 		return shouldRetry(ctx, err)
 	})
 	if err != nil {

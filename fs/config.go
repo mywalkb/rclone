@@ -29,6 +29,12 @@ var (
 		return errors.New("no config file set handler")
 	}
 
+	// Check if the config file has the named section
+	//
+	// This is a function pointer to decouple the config
+	// implementation from the fs
+	ConfigFileHasSection = func(section string) bool { return false }
+
 	// CountError counts an error.  If any errors have been
 	// counted then rclone will exit with a non zero error code.
 	//
@@ -65,6 +71,7 @@ type ConfigInfo struct {
 	InsecureSkipVerify      bool // Skip server certificate verification
 	DeleteMode              DeleteMode
 	MaxDelete               int64
+	MaxDeleteSize           SizeSuffix
 	TrackRenames            bool   // Track file renames.
 	TrackRenamesStrategy    string // Comma separated list of strategies used to track renames
 	LowLevelRetries         int
@@ -114,9 +121,9 @@ type ConfigInfo struct {
 	ProgressTerminalTitle   bool
 	Cookie                  bool
 	UseMmap                 bool
-	CaCert                  string // Client Side CA
-	ClientCert              string // Client Side Cert
-	ClientKey               string // Client Side Key
+	CaCert                  []string // Client Side CA
+	ClientCert              string   // Client Side Cert
+	ClientKey               string   // Client Side Key
 	MultiThreadCutoff       SizeSuffix
 	MultiThreadStreams      int
 	MultiThreadSet          bool   // whether MultiThreadStreams was set (set in fs/config/configflags)
@@ -136,6 +143,9 @@ type ConfigInfo struct {
 	DisableHTTPKeepAlives   bool
 	Metadata                bool
 	ServerSideAcrossConfigs bool
+	TerminalColorMode       TerminalColorMode
+	DefaultTime             Time // time that directories with no time should display
+	Inplace                 bool // Download directly to destination file instead of atomic download to temp/rename
 }
 
 // NewConfig creates a new config with everything set to the default
@@ -155,6 +165,7 @@ func NewConfig() *ConfigInfo {
 	c.ExpectContinueTimeout = 1 * time.Second
 	c.DeleteMode = DeleteModeDefault
 	c.MaxDelete = -1
+	c.MaxDeleteSize = SizeSuffix(-1)
 	c.LowLevelRetries = 10
 	c.MaxDepth = -1
 	c.DataRateUnit = "bytes"
@@ -176,6 +187,7 @@ func NewConfig() *ConfigInfo {
 	c.FsCacheExpireDuration = 300 * time.Second
 	c.FsCacheExpireInterval = 60 * time.Second
 	c.KvLockTime = 1 * time.Second
+	c.DefaultTime = Time(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	// Perform a simple check for debug flags to enable debug logging during the flag initialization
 	for argIndex, arg := range os.Args {

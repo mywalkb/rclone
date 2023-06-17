@@ -12,7 +12,6 @@ import (
 	"fmt"
 	gohash "hash"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -820,6 +819,8 @@ func (f *Fs) getAuth(req *http.Request) error {
 	// Set Authorization header
 	dataHeader := generateDataHeader(f)
 	path := req.URL.RequestURI()
+	//lint:ignore SA1008 false positive when running staticcheck, the header name is according to docs even if not canonical
+	//nolint:staticcheck // Don't include staticcheck when running golangci-lint to avoid SA1008
 	actionHeader := req.Header["X-Akamai-ACS-Action"][0]
 	fs.Debugf(nil, "NetStorage API %s call %s for path %q", req.Method, actionHeader, path)
 	req.Header.Set("X-Akamai-ACS-Auth-Data", dataHeader)
@@ -972,7 +973,7 @@ func (o *Object) netStorageUploadRequest(ctx context.Context, in io.Reader, src 
 		URL = o.fs.url(src.Remote())
 	}
 	if strings.HasSuffix(URL, ".rclonelink") {
-		bits, err := ioutil.ReadAll(in)
+		bits, err := io.ReadAll(in)
 		if err != nil {
 			return err
 		}
@@ -1058,7 +1059,7 @@ func (o *Object) netStorageDownloadRequest(ctx context.Context, options []fs.Ope
 	if strings.HasSuffix(URL, ".rclonelink") && o.target != "" {
 		fs.Infof(nil, "Converting a symlink to the rclonelink file on download %q", URL)
 		reader := strings.NewReader(o.target)
-		readcloser := ioutil.NopCloser(reader)
+		readcloser := io.NopCloser(reader)
 		return readcloser, nil
 	}
 

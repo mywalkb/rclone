@@ -44,7 +44,7 @@ func NewClient(c *http.Client) *Client {
 // ReadBody reads resp.Body into result, closing the body
 func ReadBody(resp *http.Response) (result []byte, err error) {
 	defer fs.CheckClose(resp.Body, &err)
-	return ioutil.ReadAll(resp.Body)
+	return io.ReadAll(resp.Body)
 }
 
 // defaultErrorHandler doesn't attempt to parse the http body, just
@@ -131,7 +131,8 @@ type Opts struct {
 	Path                  string // relative to RootURL
 	RootURL               string // override RootURL passed into SetRoot()
 	Body                  io.Reader
-	NoResponse            bool // set to close Body
+	GetBody               func() (io.ReadCloser, error) // body builder, needed to enable low-level HTTP/2 retries
+	NoResponse            bool                          // set to close Body
 	ContentType           string
 	ContentLength         *int64
 	ContentRange          string
@@ -157,16 +158,41 @@ func (o *Opts) Copy() *Opts {
 	return &newOpts
 }
 
+const drainLimit = 10 * 1024 * 1024
+
+// drainAndClose discards up to drainLimit bytes from r and closes
+// it. Any errors from the Read or Close are returned.
+func drainAndClose(r io.ReadCloser) (err error) {
+	_, readErr := io.CopyN(ioutil.Discard, r, drainLimit)
+	if readErr == io.EOF {
+		readErr = nil
+	}
+	err = r.Close()
+	if readErr != nil {
+		return readErr
+	}
+	return err
+}
+
+// checkDrainAndClose is a utility function used to check the return
+// from drainAndClose in a defer statement.
+func checkDrainAndClose(r io.ReadCloser, err *error) {
+	cerr := drainAndClose(r)
+	if *err == nil {
+		*err = cerr
+	}
+}
+
 // DecodeJSON decodes resp.Body into result
 func DecodeJSON(resp *http.Response, result interface{}) (err error) {
-	defer fs.CheckClose(resp.Body, &err)
+	defer checkDrainAndClose(resp.Body, &err)
 	decoder := json.NewDecoder(resp.Body)
 	return decoder.Decode(result)
 }
 
 // DecodeXML decodes resp.Body into result
 func DecodeXML(resp *http.Response, result interface{}) (err error) {
-	defer fs.CheckClose(resp.Body, &err)
+	defer checkDrainAndClose(resp.Body, &err)
 	decoder := xml.NewDecoder(resp.Body)
 	// MEGAcmd has included escaped HTML entities in its XML output, so we have to be able to
 	// decode them.
@@ -240,6 +266,9 @@ func (api *Client) Call(ctx context.Context, opts *Opts) (resp *http.Response, e
 	if len(opts.TransferEncoding) != 0 {
 		req.TransferEncoding = opts.TransferEncoding
 	}
+	if opts.GetBody != nil {
+		req.GetBody = opts.GetBody
+	}
 	if opts.Trailer != nil {
 		req.Trailer = *opts.Trailer
 	}
@@ -301,7 +330,7 @@ func (api *Client) Call(ctx context.Context, opts *Opts) (resp *http.Response, e
 		}
 	}
 	if opts.NoResponse {
-		return resp, resp.Body.Close()
+		return resp, drainAndClose(resp.Body)
 	}
 	return resp, nil
 }

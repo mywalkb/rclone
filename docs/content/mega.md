@@ -1,6 +1,7 @@
 ---
 title: "Mega"
 description: "Rclone docs for Mega"
+versionIntroduced: "v1.41"
 ---
 
 # {{< icon "fa fa-archive" >}} Mega
@@ -248,6 +249,23 @@ Properties:
 
 - Config:      hard_delete
 - Env Var:     RCLONE_MEGA_HARD_DELETE
+- Type:        bool
+- Default:     false
+
+#### --mega-use-https
+
+Use HTTPS for transfers.
+
+MEGA uses plain text HTTP connections by default.
+Some ISPs throttle HTTP connections, this causes transfers to become very slow.
+Enabling this will force MEGA to use HTTPS for all transfers.
+HTTPS is normally not necessary since all data is already encrypted anyway.
+Enabling it will increase CPU usage and add network overhead.
+
+Properties:
+
+- Config:      use_https
+- Env Var:     RCLONE_MEGA_USE_HTTPS
 - Type:        bool
 - Default:     false
 

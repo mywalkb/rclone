@@ -68,7 +68,7 @@ func (fh *WriteFileHandle) openPending() (err error) {
 	pipeReader, fh.pipeWriter = io.Pipe()
 	go func() {
 		// NB Rcat deals with Stats.Transferring, etc.
-		o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
+		o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now(), nil)
 		if err != nil {
 			fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
 		}
@@ -203,6 +203,11 @@ func (fh *WriteFileHandle) close() (err error) {
 	if err == nil {
 		fh.file.setObject(fh.o)
 		err = writeCloseErr
+	} else {
+		// Remove vfs file entry when no object is present
+		if fh.file.getObject() == nil {
+			_ = fh.file.Remove()
+		}
 	}
 	return err
 }

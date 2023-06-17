@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/filter"
 	"github.com/rclone/rclone/fs/hash"
@@ -33,7 +34,6 @@ func TestMain(m *testing.M) {
 // Test copy with source file that's updating
 func TestUpdatingCheck(t *testing.T) {
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	filePath := "sub dir/local test"
 	r.WriteFile(filePath, "content", time.Now())
 
@@ -78,7 +78,6 @@ func TestUpdatingCheck(t *testing.T) {
 func TestSymlink(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	f := r.Flocal.(*Fs)
 	dir := f.root
 
@@ -147,10 +146,24 @@ func TestSymlink(t *testing.T) {
 	_, err = r.Flocal.NewObject(ctx, "symlink2.txt")
 	require.Equal(t, fs.ErrorObjectNotFound, err)
 
+	// Check that NewFs works with the suffixed version and --links
+	f2, err := NewFs(ctx, "local", filepath.Join(dir, "symlink2.txt"+linkSuffix), configmap.Simple{
+		"links": "true",
+	})
+	require.Equal(t, fs.ErrorIsFile, err)
+	require.Equal(t, dir, f2.(*Fs).root)
+
+	// Check that NewFs doesn't see the non suffixed version with --links
+	f2, err = NewFs(ctx, "local", filepath.Join(dir, "symlink2.txt"), configmap.Simple{
+		"links": "true",
+	})
+	require.Equal(t, errLinksNeedsSuffix, err)
+	require.Nil(t, f2)
+
 	// Check reading the object
 	in, err := o.Open(ctx)
 	require.NoError(t, err)
-	contents, err := ioutil.ReadAll(in)
+	contents, err := io.ReadAll(in)
 	require.NoError(t, err)
 	require.Equal(t, "file.txt", string(contents))
 	require.NoError(t, in.Close())
@@ -158,7 +171,7 @@ func TestSymlink(t *testing.T) {
 	// Check reading the object with range
 	in, err = o.Open(ctx, &fs.RangeOption{Start: 2, End: 5})
 	require.NoError(t, err)
-	contents, err = ioutil.ReadAll(in)
+	contents, err = io.ReadAll(in)
 	require.NoError(t, err)
 	require.Equal(t, "file.txt"[2:5+1], string(contents))
 	require.NoError(t, in.Close())
@@ -177,7 +190,6 @@ func TestSymlinkError(t *testing.T) {
 func TestHashOnUpdate(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	const filePath = "file.txt"
 	when := time.Now()
 	r.WriteFile(filePath, "content", when)
@@ -208,7 +220,6 @@ func TestHashOnUpdate(t *testing.T) {
 func TestHashOnDelete(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	const filePath = "file.txt"
 	when := time.Now()
 	r.WriteFile(filePath, "content", when)
@@ -237,7 +248,6 @@ func TestHashOnDelete(t *testing.T) {
 func TestMetadata(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	const filePath = "metafile.txt"
 	when := time.Now()
 	const dayLength = len("2001-01-01")
@@ -372,7 +382,6 @@ func TestMetadata(t *testing.T) {
 func TestFilter(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	when := time.Now()
 	r.WriteFile("included", "included file", when)
 	r.WriteFile("excluded", "excluded file", when)
@@ -400,4 +409,108 @@ func TestFilter(t *testing.T) {
 	require.NoError(t, err)
 	sort.Sort(entries)
 	require.Equal(t, "[included]", fmt.Sprint(entries))
+}
+
+func testFilterSymlink(t *testing.T, copyLinks bool) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	defer r.Finalise()
+	when := time.Now()
+	f := r.Flocal.(*Fs)
+
+	// Create a file, a directory, a symlink to a file, a symlink to a directory and a dangling symlink
+	r.WriteFile("included.file", "included file", when)
+	r.WriteFile("included.dir/included.sub.file", "included sub file", when)
+	require.NoError(t, os.Symlink("included.file", filepath.Join(r.LocalName, "included.file.link")))
+	require.NoError(t, os.Symlink("included.dir", filepath.Join(r.LocalName, "included.dir.link")))
+	require.NoError(t, os.Symlink("dangling", filepath.Join(r.LocalName, "dangling.link")))
+
+	defer func() {
+		// Reset -L/-l mode
+		f.opt.FollowSymlinks = false
+		f.opt.TranslateSymlinks = false
+		f.lstat = os.Lstat
+	}()
+	if copyLinks {
+		// Set fs into "-L" mode
+		f.opt.FollowSymlinks = true
+		f.opt.TranslateSymlinks = false
+		f.lstat = os.Stat
+	} else {
+		// Set fs into "-l" mode
+		f.opt.FollowSymlinks = false
+		f.opt.TranslateSymlinks = true
+		f.lstat = os.Lstat
+	}
+
+	// Check set up for filtering
+	assert.True(t, f.Features().FilterAware)
+
+	// Reset global error count
+	accounting.Stats(ctx).ResetErrors()
+	assert.Equal(t, int64(0), accounting.Stats(ctx).GetErrors(), "global errors found")
+
+	// Add a filter
+	ctx, fi := filter.AddConfig(ctx)
+	require.NoError(t, fi.AddRule("+ included.file"))
+	require.NoError(t, fi.AddRule("+ included.dir/**"))
+	if copyLinks {
+		require.NoError(t, fi.AddRule("+ included.file.link"))
+		require.NoError(t, fi.AddRule("+ included.dir.link/**"))
+	} else {
+		require.NoError(t, fi.AddRule("+ included.file.link.rclonelink"))
+		require.NoError(t, fi.AddRule("+ included.dir.link.rclonelink"))
+	}
+	require.NoError(t, fi.AddRule("- *"))
+
+	// Check listing without use filter flag
+	entries, err := f.List(ctx, "")
+	require.NoError(t, err)
+
+	if copyLinks {
+		// Check 1 global errors one for each dangling symlink
+		assert.Equal(t, int64(1), accounting.Stats(ctx).GetErrors(), "global errors found")
+	} else {
+		// Check 0 global errors as dangling symlink copied properly
+		assert.Equal(t, int64(0), accounting.Stats(ctx).GetErrors(), "global errors found")
+	}
+	accounting.Stats(ctx).ResetErrors()
+
+	sort.Sort(entries)
+	if copyLinks {
+		require.Equal(t, "[included.dir included.dir.link included.file included.file.link]", fmt.Sprint(entries))
+	} else {
+		require.Equal(t, "[dangling.link.rclonelink included.dir included.dir.link.rclonelink included.file included.file.link.rclonelink]", fmt.Sprint(entries))
+	}
+
+	// Add user filter flag
+	ctx = filter.SetUseFilter(ctx, true)
+
+	// Check listing with use filter flag
+	entries, err = f.List(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), accounting.Stats(ctx).GetErrors(), "global errors found")
+
+	sort.Sort(entries)
+	if copyLinks {
+		require.Equal(t, "[included.dir included.dir.link included.file included.file.link]", fmt.Sprint(entries))
+	} else {
+		require.Equal(t, "[included.dir included.dir.link.rclonelink included.file included.file.link.rclonelink]", fmt.Sprint(entries))
+	}
+
+	// Check listing through a symlink still works
+	entries, err = f.List(ctx, "included.dir")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), accounting.Stats(ctx).GetErrors(), "global errors found")
+
+	sort.Sort(entries)
+	require.Equal(t, "[included.dir/included.sub.file]", fmt.Sprint(entries))
+}
+
+func TestFilterSymlinkCopyLinks(t *testing.T) {
+	testFilterSymlink(t, true)
+}
+
+func TestFilterSymlinkLinks(t *testing.T) {
+	testFilterSymlink(t, false)
 }

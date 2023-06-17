@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"regexp"
 	"strings"
@@ -29,6 +28,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/fs/operations"
 )
@@ -186,6 +186,7 @@ func NewFs(ctx context.Context, name, rpath string, m configmap.Mapper) (fs.Fs, 
 		ReadMetadata:            true,
 		WriteMetadata:           true,
 		UserMetadata:            true,
+		PartialUploads:          true,
 	}).Fill(ctx, f).Mask(ctx, wrappedFs).WrapsFs(f, wrappedFs)
 	// We support reading MIME types no matter the wrapped fs
 	f.features.ReadMimeType = true
@@ -367,13 +368,16 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	meta := readMetadata(ctx, mo)
-	if meta == nil {
-		return nil, errors.New("error decoding metadata")
+	meta, err := readMetadata(ctx, mo)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding metadata: %w", err)
 	}
 	// Create our Object
 	o, err := f.Fs.NewObject(ctx, makeDataName(remote, meta.CompressionMetadata.Size, meta.Mode))
-	return f.newObject(o, mo, meta), err
+	if err != nil {
+		return nil, err
+	}
+	return f.newObject(o, mo, meta), nil
 }
 
 // checkCompressAndType checks if an object is compressible and determines it's mime type
@@ -464,7 +468,7 @@ func (f *Fs) rcat(ctx context.Context, dstFileName string, in io.ReadCloser, mod
 	}
 
 	fs.Debugf(f, "Target remote doesn't support streaming uploads, creating temporary local file")
-	tempFile, err := ioutil.TempFile("", "rclone-press-")
+	tempFile, err := os.CreateTemp("", "rclone-press-")
 	defer func() {
 		// these errors should be relatively uncritical and the upload should've succeeded so it's okay-ish
 		// to ignore them
@@ -542,8 +546,8 @@ func (f *Fs) putCompress(ctx context.Context, in io.Reader, src fs.ObjectInfo, o
 	}
 
 	// Transfer the data
-	o, err := f.rcat(ctx, makeDataName(src.Remote(), src.Size(), f.mode), ioutil.NopCloser(wrappedIn), src.ModTime(ctx), options)
-	//o, err := operations.Rcat(ctx, f.Fs, makeDataName(src.Remote(), src.Size(), f.mode), ioutil.NopCloser(wrappedIn), src.ModTime(ctx))
+	o, err := f.rcat(ctx, makeDataName(src.Remote(), src.Size(), f.mode), io.NopCloser(wrappedIn), src.ModTime(ctx), options)
+	//o, err := operations.Rcat(ctx, f.Fs, makeDataName(src.Remote(), src.Size(), f.mode), io.NopCloser(wrappedIn), src.ModTime(ctx))
 	if err != nil {
 		if o != nil {
 			removeErr := o.Remove(ctx)
@@ -677,7 +681,7 @@ func (f *Fs) putWithCustomFunctions(ctx context.Context, in io.Reader, src fs.Ob
 		}
 		return nil, err
 	}
-	return f.newObject(dataObject, mo, meta), err
+	return f.newObject(dataObject, mo, meta), nil
 }
 
 // Put in to the remote path with the modTime given of the given size
@@ -1040,24 +1044,19 @@ func newMetadata(size int64, mode int, cmeta sgzip.GzipMetadata, md5 string, mim
 }
 
 // This function will read the metadata from a metadata object.
-func readMetadata(ctx context.Context, mo fs.Object) (meta *ObjectMetadata) {
+func readMetadata(ctx context.Context, mo fs.Object) (meta *ObjectMetadata, err error) {
 	// Open our meradata object
 	rc, err := mo.Open(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	defer func() {
-		err := rc.Close()
-		if err != nil {
-			fs.Errorf(mo, "Error closing object: %v", err)
-		}
-	}()
+	defer fs.CheckClose(rc, &err)
 	jr := json.NewDecoder(rc)
 	meta = new(ObjectMetadata)
 	if err = jr.Decode(meta); err != nil {
-		return nil
+		return nil, err
 	}
-	return meta
+	return meta, nil
 }
 
 // Remove removes this object
@@ -1102,6 +1101,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	origName := o.Remote()
 	if o.meta.Mode != Uncompressed || compressible {
 		newObject, err = o.f.putWithCustomFunctions(ctx, in, o.f.wrapInfo(src, origName, src.Size()), options, o.f.Fs.Put, updateMeta, compressible, mimeType)
+		if err != nil {
+			return err
+		}
 		if newObject.Object.Remote() != o.Object.Remote() {
 			if removeErr := o.Object.Remove(ctx); removeErr != nil {
 				return removeErr
@@ -1115,9 +1117,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		}
 		// If we are, just update the object and metadata
 		newObject, err = o.f.putWithCustomFunctions(ctx, in, src, options, update, updateMeta, compressible, mimeType)
-	}
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 	// Update object metadata and return
 	o.Object = newObject.Object
@@ -1128,6 +1130,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 // This will initialize the variables of a new press Object. The metadata object, mo, and metadata struct, meta, must be specified.
 func (f *Fs) newObject(o fs.Object, mo fs.Object, meta *ObjectMetadata) *Object {
+	if o == nil {
+		log.Trace(nil, "newObject(%#v, %#v, %#v) called with nil o", o, mo, meta)
+	}
 	return &Object{
 		Object: o,
 		f:      f,
@@ -1140,6 +1145,9 @@ func (f *Fs) newObject(o fs.Object, mo fs.Object, meta *ObjectMetadata) *Object 
 
 // This initializes the variables of a press Object with only the size. The metadata will be loaded later on demand.
 func (f *Fs) newObjectSizeAndNameOnly(o fs.Object, moName string, size int64) *Object {
+	if o == nil {
+		log.Trace(nil, "newObjectSizeAndNameOnly(%#v, %#v, %#v) called with nil o", o, moName, size)
+	}
 	return &Object{
 		Object: o,
 		f:      f,
@@ -1167,7 +1175,7 @@ func (o *Object) loadMetadataIfNotLoaded(ctx context.Context) (err error) {
 		return err
 	}
 	if o.meta == nil {
-		o.meta = readMetadata(ctx, o.mo)
+		o.meta, err = readMetadata(ctx, o.mo)
 	}
 	return err
 }

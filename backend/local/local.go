@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -124,8 +123,8 @@ routine so this flag shouldn't normally be used.`,
 			Help: `Don't check to see if the files change during upload.
 
 Normally rclone checks the size and modification time of files as they
-are being uploaded and aborts with a message which starts "can't copy
-- source file is being updated" if the file changes during upload.
+are being uploaded and aborts with a message which starts "can't copy -
+source file is being updated" if the file changes during upload.
 
 However on some file systems this modification time check may fail (e.g.
 [Glusterfs #2206](https://github.com/rclone/rclone/issues/2206)) so this
@@ -267,7 +266,10 @@ type Object struct {
 
 // ------------------------------------------------------------
 
-var errLinksAndCopyLinks = errors.New("can't use -l/--links with -L/--copy-links")
+var (
+	errLinksAndCopyLinks = errors.New("can't use -l/--links with -L/--copy-links")
+	errLinksNeedsSuffix  = errors.New("need \"" + linkSuffix + "\" suffix to refer to symlink when using -l/--links")
+)
 
 // NewFs constructs an Fs from the path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
@@ -301,6 +303,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		WriteMetadata:           true,
 		UserMetadata:            xattrSupported, // can only R/W general purpose metadata if xattrs are supported
 		FilterAware:             true,
+		PartialUploads:          true,
 	}).Fill(ctx, f)
 	if opt.FollowSymlinks {
 		f.lstat = os.Stat
@@ -311,7 +314,16 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err == nil {
 		f.dev = readDevice(fi, f.opt.OneFileSystem)
 	}
+	// Check to see if this is a .rclonelink if not found
+	hasLinkSuffix := strings.HasSuffix(f.root, linkSuffix)
+	if hasLinkSuffix && opt.TranslateSymlinks && os.IsNotExist(err) {
+		fi, err = f.lstat(strings.TrimSuffix(f.root, linkSuffix))
+	}
 	if err == nil && f.isRegular(fi.Mode()) {
+		// Handle the odd case, that a symlink was specified by name without the link suffix
+		if !hasLinkSuffix && opt.TranslateSymlinks && fi.Mode()&os.ModeSymlink != 0 {
+			return nil, errLinksNeedsSuffix
+		}
 		// It is a file, so use the parent as the root
 		f.root = filepath.Dir(f.root)
 		// return an error with an fs which points to the parent
@@ -504,7 +516,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 								continue
 							}
 						}
-						err = fmt.Errorf("failed to read directory %q: %w", namepath, err)
+						err = fmt.Errorf("failed to read directory %q: %w", namepath, fierr)
 						fs.Errorf(dir, "%v", fierr)
 						_ = accounting.Stats(ctx).Error(fserrors.NoRetryError(fierr)) // fail the sync
 						continue
@@ -521,15 +533,14 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			name := fi.Name()
 			mode := fi.Mode()
 			newRemote := f.cleanRemote(dir, name)
-			// Don't include non directory if not included
-			// we leave directory filtering to the layer above
-			if useFilter && !fi.IsDir() && !filter.IncludeRemote(newRemote) {
-				continue
-			}
 			// Follow symlinks if required
 			if f.opt.FollowSymlinks && (mode&os.ModeSymlink) != 0 {
 				localPath := filepath.Join(fsDirPath, name)
 				fi, err = os.Stat(localPath)
+				// Quietly skip errors on excluded files and directories
+				if err != nil && useFilter && !filter.IncludeRemote(newRemote) {
+					continue
+				}
 				if os.IsNotExist(err) || isCircularSymlinkError(err) {
 					// Skip bad symlinks and circular symlinks
 					err = fserrors.NoRetryError(fmt.Errorf("symlink: %w", err))
@@ -553,6 +564,11 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 				// Check whether this link should be translated
 				if f.opt.TranslateSymlinks && fi.Mode()&os.ModeSymlink != 0 {
 					newRemote += linkSuffix
+				}
+				// Don't include non directory if not included
+				// we leave directory filtering to the layer above
+				if useFilter && !filter.IncludeRemote(newRemote) {
+					continue
 				}
 				fso, err := f.newObjectWithInfo(newRemote, fi)
 				if err != nil {
@@ -646,7 +662,7 @@ func (f *Fs) readPrecision() (precision time.Duration) {
 	precision = time.Second
 
 	// Create temporary file and test it
-	fd, err := ioutil.TempFile("", "rclone")
+	fd, err := os.CreateTemp("", "rclone")
 	if err != nil {
 		// If failed return 1s
 		// fmt.Println("Failed to create temp file", err)
@@ -1073,7 +1089,7 @@ func (o *Object) openTranslatedLink(offset, limit int64) (lrc io.ReadCloser, err
 	if err != nil {
 		return nil, err
 	}
-	return readers.NewLimitedReadCloser(ioutil.NopCloser(strings.NewReader(linkdst[offset:])), limit), nil
+	return readers.NewLimitedReadCloser(io.NopCloser(strings.NewReader(linkdst[offset:])), limit), nil
 }
 
 // Open an object for read
@@ -1400,29 +1416,26 @@ func (o *Object) writeMetadata(metadata fs.Metadata) (err error) {
 }
 
 func cleanRootPath(s string, noUNC bool, enc encoder.MultiEncoder) string {
-	if runtime.GOOS == "windows" {
-		if !filepath.IsAbs(s) && !strings.HasPrefix(s, "\\") {
+	if runtime.GOOS != "windows" || !strings.HasPrefix(s, "\\") {
+		if !filepath.IsAbs(s) {
 			s2, err := filepath.Abs(s)
 			if err == nil {
 				s = s2
 			}
+		} else {
+			s = filepath.Clean(s)
 		}
+	}
+	if runtime.GOOS == "windows" {
 		s = filepath.ToSlash(s)
 		vol := filepath.VolumeName(s)
 		s = vol + enc.FromStandardPath(s[len(vol):])
 		s = filepath.FromSlash(s)
-
 		if !noUNC {
 			// Convert to UNC
 			s = file.UNCPath(s)
 		}
 		return s
-	}
-	if !filepath.IsAbs(s) {
-		s2, err := filepath.Abs(s)
-		if err == nil {
-			s = s2
-		}
 	}
 	s = enc.FromStandardPath(s)
 	return s

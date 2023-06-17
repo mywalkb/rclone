@@ -17,6 +17,7 @@ import (
 	"github.com/anacrolix/dms/soap"
 	"github.com/anacrolix/dms/ssdp"
 	"github.com/anacrolix/dms/upnp"
+	"github.com/anacrolix/log"
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/cmd/serve/dlna/data"
 	"github.com/rclone/rclone/cmd/serve/dlna/dlnaflags"
@@ -47,6 +48,9 @@ media transcoding support. This means that some players might show
 files that they are not able to play back correctly.
 
 ` + dlnaflags.Help + vfs.Help,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.46",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		f := cmd.NewFsSrc(args)
@@ -118,7 +122,7 @@ func newServer(f fs.Fs, opt *dlnaflags.Options) (*server, error) {
 	}
 
 	s := &server{
-		AnnounceInterval: 10 * time.Second,
+		AnnounceInterval: opt.AnnounceInterval,
 		FriendlyName:     friendlyName,
 		RootDeviceUUID:   makeDeviceUUID(friendlyName),
 		Interfaces:       interfaces,
@@ -279,7 +283,14 @@ func (s *server) resourceHandler(w http.ResponseWriter, r *http.Request) {
 // use s.Wait() to block on the listener indefinitely.
 func (s *server) Serve() (err error) {
 	if s.HTTPConn == nil {
-		s.HTTPConn, err = net.Listen("tcp", s.httpListenAddr)
+		// Currently, the SSDP server only listens on an IPv4 multicast address.
+		// Differentiate between two INADDR_ANY addresses,
+		// so that 0.0.0.0 can only listen on IPv4 addresses.
+		network := "tcp4"
+		if strings.Count(s.httpListenAddr, ":") > 1 {
+			network = "tcp"
+		}
+		s.HTTPConn, err = net.Listen(network, s.httpListenAddr)
 		if err != nil {
 			return
 		}
@@ -292,7 +303,7 @@ func (s *server) Serve() (err error) {
 	go func() {
 		fs.Logf(s.f, "Serving HTTP on %s", s.HTTPConn.Addr().String())
 
-		err = s.serveHTTP()
+		err := s.serveHTTP()
 		if err != nil {
 			fs.Logf(s.f, "Error on serving HTTP server: %v", err)
 		}
@@ -336,6 +347,30 @@ func (s *server) startSSDP() {
 
 // Run SSDP server on an interface.
 func (s *server) ssdpInterface(intf net.Interface) {
+	// Figure out whether should an ip be announced
+	ipfilterFn := func(ip net.IP) bool {
+		listenaddr := s.HTTPConn.Addr().String()
+		listenip := listenaddr[:strings.LastIndex(listenaddr, ":")]
+		switch listenip {
+		case "0.0.0.0":
+			if strings.Contains(ip.String(), ":") {
+				// Any IPv6 address should not be announced
+				// because SSDP only listen on IPv4 multicast address
+				return false
+			}
+			return true
+		case "[::]":
+			// In the @Serve() section, the default settings have been made to not listen on IPv6 addresses.
+			// If actually still listening on [::], then allow to announce any address.
+			return true
+		default:
+			if listenip == ip.String() {
+				return true
+			}
+			return false
+		}
+	}
+
 	// Figure out which HTTP location to advertise based on the interface IP.
 	advertiseLocationFn := func(ip net.IP) string {
 		url := url.URL{
@@ -349,6 +384,12 @@ func (s *server) ssdpInterface(intf net.Interface) {
 		return url.String()
 	}
 
+	_, err := intf.Addrs()
+	if err != nil {
+		panic(err)
+	}
+	fs.Logf(s, "Started SSDP on %v", intf.Name)
+
 	// Note that the devices and services advertised here via SSDP should be
 	// in agreement with the rootDesc XML descriptor that is defined above.
 	ssdpServer := ssdp.Server{
@@ -359,10 +400,12 @@ func (s *server) ssdpInterface(intf net.Interface) {
 			"urn:schemas-upnp-org:service:ContentDirectory:1",
 			"urn:schemas-upnp-org:service:ConnectionManager:1",
 			"urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1"},
+		IPFilter:       ipfilterFn,
 		Location:       advertiseLocationFn,
 		Server:         serverField,
 		UUID:           s.RootDeviceUUID,
 		NotifyInterval: s.AnnounceInterval,
+		Logger:         log.Default,
 	}
 
 	// An interface with these flags should be valid for SSDP.

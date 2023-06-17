@@ -108,12 +108,15 @@ which can lead to "corrupted on transfer" errors. This is the case because
 the client chooses indiscriminately which server to send commands to while
 the servers all have different views of the state of the filing system.
 
-The "restrict" in authorized_keys prevents SHA1SUMs and MD5SUMs from beeing
+The "restrict" in authorized_keys prevents SHA1SUMs and MD5SUMs from being
 used. Omitting "restrict" and using  ` + "`--sftp-path-override`" + ` to enable
 checksumming is possible but less secure and you could use the SFTP server
 provided by OpenSSH in this case.
 
 ` + vfs.Help + proxy.Help,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.48",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		var f fs.Fs
 		if proxyflags.Opt.AuthProxy == "" {

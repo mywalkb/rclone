@@ -22,11 +22,11 @@ func init() {
 
 var commandDefinition = &cobra.Command{
 	Use:   "cryptcheck remote:path cryptedremote:path",
-	Short: `Cryptcheck checks the integrity of a crypted remote.`,
+	Short: `Cryptcheck checks the integrity of an encrypted remote.`,
 	Long: `
 rclone cryptcheck checks a remote against a [crypted](/crypt/) remote.
 This is the equivalent of running rclone [check](/commands/rclone_check/),
-but able to check the checksums of the crypted remote.
+but able to check the checksums of the encrypted remote.
 
 For it to work the underlying remote of the cryptedremote must support
 some kind of checksum.
@@ -47,6 +47,9 @@ the files in remote:path.
 
 After it has run it will log the status of the encryptedremote:.
 ` + check.FlagsHelp,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.36",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, fdst := cmd.NewFsSrcDst(args)
@@ -56,7 +59,7 @@ After it has run it will log the status of the encryptedremote:.
 	},
 }
 
-// cryptCheck checks the integrity of a crypted remote
+// cryptCheck checks the integrity of an encrypted remote
 func cryptCheck(ctx context.Context, fdst, fsrc fs.Fs) error {
 	// Check to see fcrypt is a crypt
 	fcrypt, ok := fdst.(*crypt.Fs)

@@ -2,11 +2,13 @@
 package rcflags
 
 import (
-	"github.com/rclone/rclone/cmd/serve/httplib/httpflags"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/spf13/pflag"
 )
+
+// FlagPrefix is the prefix used to uniquely identify command line flags.
+const FlagPrefix = "rc-"
 
 // Options set by command line flags
 var (
@@ -29,5 +31,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &Opt.EnableMetrics, "rc-enable-metrics", "", false, "Enable prometheus metrics on /metrics")
 	flags.DurationVarP(flagSet, &Opt.JobExpireDuration, "rc-job-expire-duration", "", Opt.JobExpireDuration, "Expire finished async jobs older than this value")
 	flags.DurationVarP(flagSet, &Opt.JobExpireInterval, "rc-job-expire-interval", "", Opt.JobExpireInterval, "Interval to check for expired async jobs")
-	httpflags.AddFlagsPrefix(flagSet, "rc-", &Opt.HTTPOptions)
+	Opt.HTTP.AddFlagsPrefix(flagSet, FlagPrefix)
+	Opt.Auth.AddFlagsPrefix(flagSet, FlagPrefix)
+	Opt.Template.AddFlagsPrefix(flagSet, FlagPrefix)
 }

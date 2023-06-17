@@ -58,6 +58,9 @@ Pass arguments to the backend by placing them on the end of the line
 Note to run these commands on a running backend then see
 [backend/command](/rc/#backend-command) in the rc docs.
 `,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.52",
+	},
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(2, 1e6, command, args)
 		name, remote := args[0], args[1]
@@ -95,8 +98,14 @@ Note to run these commands on a running backend then see
 				out, err = doCommand(context.Background(), name, arg, opt)
 			}
 			if err != nil {
+				if err == fs.ErrorCommandNotFound {
+					extra := ""
+					if f.Features().Overlay {
+						extra = " (try the underlying remote)"
+					}
+					return fmt.Errorf("%q %w%s", name, err, extra)
+				}
 				return fmt.Errorf("command %q failed: %w", name, err)
-
 			}
 			// Output the result
 			writeJSON := false

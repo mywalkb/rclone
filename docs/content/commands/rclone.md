@@ -37,7 +37,7 @@ See the [global flags page](/flags/) for global options not listed here.
 * [rclone about](/commands/rclone_about/)	 - Get quota information from the remote.
 * [rclone authorize](/commands/rclone_authorize/)	 - Remote authorization.
 * [rclone backend](/commands/rclone_backend/)	 - Run a backend-specific command.
-* [rclone bisync](/commands/rclone_bisync/)	 - Perform bidirectonal synchronization between two paths.
+* [rclone bisync](/commands/rclone_bisync/)	 - Perform bidirectional synchronization between two paths.
 * [rclone cat](/commands/rclone_cat/)	 - Concatenates any files and sends them to stdout.
 * [rclone check](/commands/rclone_check/)	 - Checks the files in the source and destination match.
 * [rclone checksum](/commands/rclone_checksum/)	 - Checks the files in the source against a SUM file.
@@ -47,7 +47,7 @@ See the [global flags page](/flags/) for global options not listed here.
 * [rclone copy](/commands/rclone_copy/)	 - Copy files from source to dest, skipping identical files.
 * [rclone copyto](/commands/rclone_copyto/)	 - Copy files from source to dest, skipping identical files.
 * [rclone copyurl](/commands/rclone_copyurl/)	 - Copy url content to dest.
-* [rclone cryptcheck](/commands/rclone_cryptcheck/)	 - Cryptcheck checks the integrity of a crypted remote.
+* [rclone cryptcheck](/commands/rclone_cryptcheck/)	 - Cryptcheck checks the integrity of an encrypted remote.
 * [rclone cryptdecode](/commands/rclone_cryptdecode/)	 - Cryptdecode returns unencrypted file names.
 * [rclone dedupe](/commands/rclone_dedupe/)	 - Interactively find duplicate filenames and delete/rename them.
 * [rclone delete](/commands/rclone_delete/)	 - Remove the files in path.

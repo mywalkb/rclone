@@ -1,6 +1,7 @@
 ---
 title: "Uptobox"
 description: "Rclone docs for Uptobox"
+versionIntroduced: "v1.56"
 ---
 
 # {{< icon "fa fa-archive" >}} Uptobox
@@ -83,7 +84,8 @@ To copy a local directory to an Uptobox directory called backup
 
 ### Modified time and hashes
 
-Uptobox supports neither modified times nor checksums.
+Uptobox supports neither modified times nor checksums. All timestamps
+will read as that set by `--default-time`.
 
 ### Restricted filename characters
 

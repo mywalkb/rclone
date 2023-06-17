@@ -1,6 +1,7 @@
 ---
 title: "SFTP"
 description: "SFTP"
+versionIntroduced: "v1.36"
 ---
 
 # {{< icon "fa fa-server" >}} SFTP
@@ -108,7 +109,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote directory, deleting any
 excess files in the directory.
 
-    rclone sync -i /home/local/directory remote:directory
+    rclone sync --interactive /home/local/directory remote:directory
 
 Mount the remote path `/srv/www-data/` to the local path
 `/mnt/www-data`
@@ -527,6 +528,9 @@ This enables the use of the following insecure ciphers and key exchange methods:
 
 Those algorithms are insecure and may allow plaintext data to be recovered by an attacker.
 
+This must be false if you use either ciphers or key_exchange advanced options.
+
+
 Properties:
 
 - Config:      use_insecure_cipher
@@ -789,19 +793,24 @@ Properties:
 
 Upload and download chunk size.
 
-This controls the maximum packet size used in the SFTP protocol. The
-RFC limits this to 32768 bytes (32k), however a lot of servers
-support larger sizes and setting it larger will increase transfer
-speed dramatically on high latency links.
+This controls the maximum size of payload in SFTP protocol packets.
+The RFC limits this to 32768 bytes (32k), which is the default. However,
+a lot of servers support larger sizes, typically limited to a maximum
+total package size of 256k, and setting it larger will increase transfer
+speed dramatically on high latency links. This includes OpenSSH, and,
+for example, using the value of 255k works well, leaving plenty of room
+for overhead while still being within a total packet size of 256k.
 
-Only use a setting higher than 32k if you always connect to the same
-server or after sufficiently broad testing.
-
-For example using the value of 252k with OpenSSH works well with its
-maximum packet size of 256k.
-
-If you get the error "failed to send packet header: EOF" when copying
-a large file, try lowering this number.
+Make sure to test thoroughly before using a value higher than 32k,
+and only use it if you always connect to the same server or after
+sufficiently broad testing. If you get errors such as
+"failed to send packet payload: EOF", lots of "connection lost",
+or "corrupted on transfer", when copying a larger file, try lowering
+the value. The server run by [rclone serve sftp](/commands/rclone_serve_sftp)
+sends packets with standard 32k maximum payload so you must not
+set a different chunk_size when downloading files, but it accepts
+packets up to the 256k total size, so for uploads the chunk_size
+can be set as for the OpenSSH example above.
 
 
 Properties:
@@ -851,6 +860,64 @@ Properties:
 
 - Config:      set_env
 - Env Var:     RCLONE_SFTP_SET_ENV
+- Type:        SpaceSepList
+- Default:     
+
+#### --sftp-ciphers
+
+Space separated list of ciphers to be used for session encryption, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q cipher.
+
+This must not be set if use_insecure_cipher is true.
+
+Example:
+
+    aes128-ctr aes192-ctr aes256-ctr aes128-gcm@openssh.com aes256-gcm@openssh.com
+
+
+Properties:
+
+- Config:      ciphers
+- Env Var:     RCLONE_SFTP_CIPHERS
+- Type:        SpaceSepList
+- Default:     
+
+#### --sftp-key-exchange
+
+Space separated list of key exchange algorithms, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q kex.
+
+This must not be set if use_insecure_cipher is true.
+
+Example:
+
+    sntrup761x25519-sha512@openssh.com curve25519-sha256 curve25519-sha256@libssh.org ecdh-sha2-nistp256
+
+
+Properties:
+
+- Config:      key_exchange
+- Env Var:     RCLONE_SFTP_KEY_EXCHANGE
+- Type:        SpaceSepList
+- Default:     
+
+#### --sftp-macs
+
+Space separated list of MACs (message authentication code) algorithms, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q mac.
+
+Example:
+
+    umac-64-etm@openssh.com umac-128-etm@openssh.com hmac-sha2-256-etm@openssh.com
+
+
+Properties:
+
+- Config:      macs
+- Env Var:     RCLONE_SFTP_MACS
 - Type:        SpaceSepList
 - Default:     
 

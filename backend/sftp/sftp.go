@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	iofs "io/fs"
 	"os"
 	"path"
 	"regexp"
@@ -123,7 +123,10 @@ This enables the use of the following insecure ciphers and key exchange methods:
 - diffie-hellman-group-exchange-sha256
 - diffie-hellman-group-exchange-sha1
 
-Those algorithms are insecure and may allow plaintext data to be recovered by an attacker.`,
+Those algorithms are insecure and may allow plaintext data to be recovered by an attacker.
+
+This must be false if you use either ciphers or key_exchange advanced options.
+`,
 			Default: false,
 			Examples: []fs.OptionExample{
 				{
@@ -321,10 +324,64 @@ Pass multiple variables space separated, eg
 
     VAR1=value VAR2=value
 
-and pass variables with spaces in in quotes, eg
+and pass variables with spaces in quotes, eg
 
     "VAR3=value with space" "VAR4=value with space" VAR5=nospacehere
 
+`,
+			Advanced: true,
+		}, {
+			Name:    "ciphers",
+			Default: fs.SpaceSepList{},
+			Help: `Space separated list of ciphers to be used for session encryption, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q cipher.
+
+This must not be set if use_insecure_cipher is true.
+
+Example:
+
+    aes128-ctr aes192-ctr aes256-ctr aes128-gcm@openssh.com aes256-gcm@openssh.com
+`,
+			Advanced: true,
+		}, {
+			Name:    "key_exchange",
+			Default: fs.SpaceSepList{},
+			Help: `Space separated list of key exchange algorithms, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q kex.
+
+This must not be set if use_insecure_cipher is true.
+
+Example:
+
+    sntrup761x25519-sha512@openssh.com curve25519-sha256 curve25519-sha256@libssh.org ecdh-sha2-nistp256
+`,
+			Advanced: true,
+		}, {
+			Name:    "macs",
+			Default: fs.SpaceSepList{},
+			Help: `Space separated list of MACs (message authentication code) algorithms, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q mac.
+
+Example:
+
+    umac-64-etm@openssh.com umac-128-etm@openssh.com hmac-sha2-256-etm@openssh.com
+`,
+			Advanced: true,
+		}, {
+			Name:    "host_key_algorithms",
+			Default: fs.SpaceSepList{},
+			Help: `Space separated list of host key algorithms, ordered by preference.
+
+At least one must match with server configuration. This can be checked for example using ssh -Q HostKeyAlgorithms.
+
+Note: This can affect the outcome of key negotiation with the server even if server host key validation is not enabled.
+
+Example:
+
+    ssh-ed25519 ssh-rsa ssh-dss
 `,
 			Advanced: true,
 		}},
@@ -362,6 +419,10 @@ type Options struct {
 	ChunkSize               fs.SizeSuffix   `config:"chunk_size"`
 	Concurrency             int             `config:"concurrency"`
 	SetEnv                  fs.SpaceSepList `config:"set_env"`
+	Ciphers                 fs.SpaceSepList `config:"ciphers"`
+	KeyExchange             fs.SpaceSepList `config:"key_exchange"`
+	MACs                    fs.SpaceSepList `config:"macs"`
+	HostKeyAlgorithms       fs.SpaceSepList `config:"host_key_algorithms"`
 }
 
 // Fs stores the interface to the remote SFTP files
@@ -694,6 +755,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		ClientVersion:   "SSH-2.0-" + f.ci.UserAgent,
 	}
 
+	if len(opt.HostKeyAlgorithms) != 0 {
+		sshConfig.HostKeyAlgorithms = []string(opt.HostKeyAlgorithms)
+	}
+
 	if opt.KnownHostsFile != "" {
 		hostcallback, err := knownhosts.New(env.ShellExpand(opt.KnownHostsFile))
 		if err != nil {
@@ -702,10 +767,25 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		sshConfig.HostKeyCallback = hostcallback
 	}
 
+	if opt.UseInsecureCipher && (opt.Ciphers != nil || opt.KeyExchange != nil) {
+		return nil, fmt.Errorf("use_insecure_cipher must be false if ciphers or key_exchange are set in advanced configuration")
+	}
+
+	sshConfig.Config.SetDefaults()
 	if opt.UseInsecureCipher {
-		sshConfig.Config.SetDefaults()
 		sshConfig.Config.Ciphers = append(sshConfig.Config.Ciphers, "aes128-cbc", "aes192-cbc", "aes256-cbc", "3des-cbc")
 		sshConfig.Config.KeyExchanges = append(sshConfig.Config.KeyExchanges, "diffie-hellman-group-exchange-sha1", "diffie-hellman-group-exchange-sha256")
+	} else {
+		if opt.Ciphers != nil {
+			sshConfig.Config.Ciphers = opt.Ciphers
+		}
+		if opt.KeyExchange != nil {
+			sshConfig.Config.KeyExchanges = opt.KeyExchange
+		}
+	}
+
+	if opt.MACs != nil {
+		sshConfig.Config.MACs = opt.MACs
 	}
 
 	keyFile := env.ShellExpand(opt.KeyFile)
@@ -722,10 +802,32 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			return nil, fmt.Errorf("couldn't read ssh agent signers: %w", err)
 		}
 		if keyFile != "" {
-			pubBytes, err := ioutil.ReadFile(keyFile + ".pub")
+			// If `opt.KeyUseAgent` is false, then it's expected that `opt.KeyFile` contains the private key
+			// and `${opt.KeyFile}.pub` contains the public key.
+			//
+			// If `opt.KeyUseAgent` is true, then it's expected that `opt.KeyFile` contains the public key.
+			// This is how it works with openssh; the `IdentityFile` in openssh config points to the public key.
+			// It's not necessary to specify the public key explicitly when using ssh-agent, since openssh and rclone
+			// will try all the keys they find in the ssh-agent until they find one that works. But just like
+			// `IdentityFile` is used in openssh config to limit the search to one specific key, so does
+			// `opt.KeyFile` in rclone config limit the search to that specific key.
+			//
+			// However, previous versions of rclone would always expect to find the public key in
+			// `${opt.KeyFile}.pub` even if `opt.KeyUseAgent` was true. So for the sake of backward compatibility
+			// we still first attempt to read the public key from `${opt.KeyFile}.pub`. But if it fails with
+			// an `fs.ErrNotExist` then we also try to read the public key from `opt.KeyFile`.
+			pubBytes, err := os.ReadFile(keyFile + ".pub")
 			if err != nil {
-				return nil, fmt.Errorf("failed to read public key file: %w", err)
+				if errors.Is(err, iofs.ErrNotExist) && opt.KeyUseAgent {
+					pubBytes, err = os.ReadFile(keyFile)
+					if err != nil {
+						return nil, fmt.Errorf("failed to read public key file: %w", err)
+					}
+				} else {
+					return nil, fmt.Errorf("failed to read public key file: %w", err)
+				}
 			}
+
 			pub, _, _, _, err := ssh.ParseAuthorizedKey(pubBytes)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse public key file: %w", err)
@@ -747,11 +849,11 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 	}
 
-	// Load key file if specified
-	if keyFile != "" || opt.KeyPem != "" {
+	// Load key file as a private key, if specified. This is only needed when not using an ssh agent.
+	if (keyFile != "" && !opt.KeyUseAgent) || opt.KeyPem != "" {
 		var key []byte
 		if opt.KeyPem == "" {
-			key, err = ioutil.ReadFile(keyFile)
+			key, err = os.ReadFile(keyFile)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read private key file: %w", err)
 			}
@@ -782,7 +884,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 		// If a public key has been specified then use that
 		if pubkeyFile != "" {
-			certfile, err := ioutil.ReadFile(pubkeyFile)
+			certfile, err := os.ReadFile(pubkeyFile)
 			if err != nil {
 				return nil, fmt.Errorf("unable to read cert file: %w", err)
 			}
@@ -892,6 +994,7 @@ func NewFsWithConnection(ctx context.Context, f *Fs, name string, root string, m
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
 		SlowHash:                true,
+		PartialUploads:          true,
 	}).Fill(ctx, f)
 	// Make a connection and pool it to return errors early
 	c, err := f.getSftpConnection(ctx)
@@ -915,20 +1018,24 @@ func NewFsWithConnection(ctx context.Context, f *Fs, name string, root string, m
 			fs.Debugf(f, "Running shell type detection remote command: %s", shellCmd)
 			err = session.Run(shellCmd)
 			_ = session.Close()
+			f.shellType = defaultShellType
 			if err != nil {
-				f.shellType = defaultShellType
 				fs.Debugf(f, "Remote command failed: %v (stdout=%v) (stderr=%v)", err, bytes.TrimSpace(stdout.Bytes()), bytes.TrimSpace(stderr.Bytes()))
 			} else {
 				outBytes := stdout.Bytes()
 				fs.Debugf(f, "Remote command result: %s", outBytes)
 				outString := string(bytes.TrimSpace(stdout.Bytes()))
-				if strings.HasPrefix(outString, "Microsoft.PowerShell") { // If PowerShell: "Microsoft.PowerShell%ComSpec%"
-					f.shellType = "powershell"
-				} else if !strings.HasSuffix(outString, "%ComSpec%") { // If Command Prompt: "${ShellId}C:\WINDOWS\system32\cmd.exe"
-					f.shellType = "cmd"
-				} else { // If Unix: "%ComSpec%"
-					f.shellType = "unix"
-				}
+				if outString != "" {
+					if strings.HasPrefix(outString, "Microsoft.PowerShell") { // PowerShell: "Microsoft.PowerShell%ComSpec%"
+						f.shellType = "powershell"
+					} else if !strings.HasSuffix(outString, "%ComSpec%") { // Command Prompt: "${ShellId}C:\WINDOWS\system32\cmd.exe"
+						// Additional positive test, to avoid misdetection on unpredicted Unix shell variants
+						s := strings.ToLower(outString)
+						if strings.Contains(s, ".exe") || strings.Contains(s, ".com") {
+							f.shellType = "cmd"
+						}
+					} // POSIX-based Unix shell: "%ComSpec%"
+				} // fish Unix shell: ""
 			}
 		}
 		// Save permanently in config to avoid the extra work next time
@@ -959,7 +1066,7 @@ func NewFsWithConnection(ctx context.Context, f *Fs, name string, root string, m
 		}
 	}
 	f.putSftpConnection(&c, err)
-	if root != "" {
+	if root != "" && !strings.HasSuffix(root, "/") {
 		// Check to see if the root is actually an existing file,
 		// and if so change the filesystem root to its parent directory.
 		oldAbsRoot := f.absRoot
@@ -1062,13 +1169,6 @@ func (f *Fs) dirExists(ctx context.Context, dir string) (bool, error) {
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	root := path.Join(f.absRoot, dir)
-	ok, err := f.dirExists(ctx, root)
-	if err != nil {
-		return nil, fmt.Errorf("List failed: %w", err)
-	}
-	if !ok {
-		return nil, fs.ErrorDirNotFound
-	}
 	sftpDir := root
 	if sftpDir == "" {
 		sftpDir = "."
@@ -1080,6 +1180,9 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	infos, err := c.sftpClient.ReadDir(sftpDir)
 	f.putSftpConnection(&c, err)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fs.ErrorDirNotFound
+		}
 		return nil, fmt.Errorf("error listing %q: %w", dir, err)
 	}
 	for _, info := range infos {
@@ -1171,6 +1274,10 @@ func (f *Fs) mkdir(ctx context.Context, dirPath string) error {
 	err = c.sftpClient.Mkdir(dirPath)
 	f.putSftpConnection(&c, err)
 	if err != nil {
+		if os.IsExist(err) {
+			fs.Debugf(f, "directory %q exists after Mkdir is attempted", dirPath)
+			return nil
+		}
 		return fmt.Errorf("mkdir %q failed: %w", dirPath, err)
 	}
 	return nil
@@ -1219,10 +1326,17 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if err != nil {
 		return nil, fmt.Errorf("Move: %w", err)
 	}
-	err = c.sftpClient.Rename(
-		srcObj.path(),
-		path.Join(f.absRoot, remote),
-	)
+	srcPath, dstPath := srcObj.path(), path.Join(f.absRoot, remote)
+	if _, ok := c.sftpClient.HasExtension("posix-rename@openssh.com"); ok {
+		err = c.sftpClient.PosixRename(srcPath, dstPath)
+	} else {
+		// If haven't got PosixRename then remove source first before renaming
+		err = c.sftpClient.Remove(dstPath)
+		if err != nil && !errors.Is(err, iofs.ErrNotExist) {
+			fs.Errorf(f, "Move: Failed to remove existing file %q: %v", dstPath, err)
+		}
+		err = c.sftpClient.Rename(srcPath, dstPath)
+	}
 	f.putSftpConnection(&c, err)
 	if err != nil {
 		return nil, fmt.Errorf("Move Rename failed: %w", err)
@@ -1707,11 +1821,14 @@ func (o *Object) setMetadata(info os.FileInfo) {
 
 // statRemote stats the file or directory at the remote given
 func (f *Fs) stat(ctx context.Context, remote string) (info os.FileInfo, err error) {
+	absPath := remote
+	if !strings.HasPrefix(remote, "/") {
+		absPath = path.Join(f.absRoot, remote)
+	}
 	c, err := f.getSftpConnection(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("stat: %w", err)
 	}
-	absPath := path.Join(f.absRoot, remote)
 	info, err = c.sftpClient.Stat(absPath)
 	f.putSftpConnection(&c, err)
 	return info, err

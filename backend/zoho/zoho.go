@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"path"
@@ -329,15 +328,6 @@ func (f *Fs) Features() *fs.Features {
 // parsePath parses a zoho 'url'
 func parsePath(path string) (root string) {
 	root = strings.Trim(path, "/")
-	return
-}
-
-func (f *Fs) splitPath(remote string) (directory, leaf string) {
-	directory, leaf = dircache.SplitPath(remote)
-	if f.root != "" {
-		// Adds the root folder to the path to get a full path
-		directory = path.Join(f.root, directory)
-	}
 	return
 }
 
@@ -1216,10 +1206,10 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if err != nil {
 		return nil, err
 	}
-	if partialContent && resp.StatusCode == 200 {
+	if partialContent && resp.StatusCode == 200 && resp.Header.Get("Content-Range") == "" {
 		if start > 0 {
 			// We need to read and discard the beginning of the data...
-			_, err = io.CopyN(ioutil.Discard, resp.Body, start)
+			_, err = io.CopyN(io.Discard, resp.Body, start)
 			if err != nil {
 				if resp != nil {
 					_ = resp.Body.Close()
